@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang-jwt/jwt"
+	jwt "github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/hkdf"
 )
 
