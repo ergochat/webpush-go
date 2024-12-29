@@ -7,7 +7,6 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -34,7 +33,7 @@ func TestEnd2End(t *testing.T) {
 		// the data known to the user agent (browser)
 		userAgent struct {
 			publicVAPIDKey        *ecdsa.PublicKey
-			subscriptionKey       *ecdsa.PrivateKey
+			subscriptionKey       *ecdh.PrivateKey
 			authSecret            [16]byte
 			subscription          Subscription
 			receivedNotifications [][]byte
@@ -109,12 +108,11 @@ func TestEnd2End(t *testing.T) {
 	// what follows is the equivalent of PushManager.subscribe() in JS
 	{
 		// the user agent generates its own key pair so it can be sent encrypted messages
-		userAgent.subscriptionKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		userAgent.subscriptionKey, err = ecdh.P256().GenerateKey(rand.Reader)
 		if err != nil {
 			t.Fatalf("generating user agent keys: %s", err)
 		}
-		// we need the ECDH representation
-		ecdhPublicKey, err := userAgent.subscriptionKey.PublicKey.ECDH()
+		ecdhPublicKey := userAgent.subscriptionKey.PublicKey()
 		if err != nil {
 			t.Fatalf("converting user agent public key to ECDH: %s", err)
 		}
@@ -267,7 +265,7 @@ func parseJWT(rawJWT string, applicationServerKey *ecdsa.PublicKey) (*jwt.Token,
 	return token, nil
 }
 
-func decodeNotification(body []byte, authSecret [16]byte, userAgentKey *ecdsa.PrivateKey) (string, error) {
+func decodeNotification(body []byte, authSecret [16]byte, userAgentECDHKey *ecdh.PrivateKey) (string, error) {
 	// remember initial body length, before we start consuming it
 	bodyLen := len(body)
 	// the body is aes128gcm-encoded as described in RFC8188,
@@ -293,14 +291,6 @@ func decodeNotification(body []byte, authSecret [16]byte, userAgentKey *ecdsa.Pr
 	if err != nil {
 		return "", fmt.Errorf("converting public key to ECDH: %w", err)
 	}
-	userAgentECDHKey, err := userAgentKey.ECDH()
-	if err != nil {
-		return "", fmt.Errorf("converting user agent private key to ECDH: %w", err)
-	}
-	userAgentECDHPublicKey, err := userAgentKey.PublicKey.ECDH()
-	if err != nil {
-		return "", fmt.Errorf("converting user agent public key to ECDH: %w", err)
-	}
 
 	sharedECDHSecret, err := userAgentECDHKey.ECDH(pubKeyECDH)
 	if err != nil {
@@ -311,7 +301,7 @@ func decodeNotification(body []byte, authSecret [16]byte, userAgentKey *ecdsa.Pr
 
 	// ikm
 	prkInfoBuf := bytes.NewBuffer([]byte("WebPush: info\x00"))
-	prkInfoBuf.Write(userAgentECDHPublicKey.Bytes()) // aka "dh"
+	prkInfoBuf.Write(userAgentECDHKey.PublicKey().Bytes()) // aka "dh"
 	prkInfoBuf.Write(pubKeyECDH.Bytes())
 
 	prkHKDF := hkdf.New(hash, sharedECDHSecret, authSecret[:], prkInfoBuf.Bytes())
