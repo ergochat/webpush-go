@@ -1,4 +1,4 @@
-module github.com/SherClockHolmes/webpush-go
+module github.com/ergochat/webpush-go/v2
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
