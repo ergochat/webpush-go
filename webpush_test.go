@@ -1,6 +1,7 @@
 package webpush
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -106,5 +107,30 @@ func TestSendTooLargeNotification(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("Error is nil, expected=%s", ErrMaxPadExceeded)
+	}
+}
+
+func BenchmarkWebPush(b *testing.B) {
+	vapidKeys, err := GenerateVAPIDKeys()
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctx := context.Background()
+	message := []byte("@time=2024-12-26T19:36:21.923Z;account=shivaram;msgid=56g9v3b92q6q4wtq43uhyqzegw :shivaram!~u@kca7nfgniet7q.irc PRIVMSG #redacted :[redacted message contents]")
+	sub := getStandardEncodedTestSubscription()
+	options := Options{
+		HTTPClient: &testHTTPClient{},
+		RecordSize: 2048,
+		Subscriber: "https://example.com",
+		TTL:        60 * 60 * 24,
+		Urgency:    UrgencyHigh,
+		VAPIDKeys:  vapidKeys,
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := SendNotificationWithContext(ctx, message, sub, &options); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
