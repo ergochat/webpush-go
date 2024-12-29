@@ -153,12 +153,12 @@ func getVAPIDAuthorizationHeader(
 	}
 
 	// Unless subscriber is an HTTPS URL, assume an e-mail address
-	if !strings.HasPrefix(subscriber, "https:") {
-		subscriber = fmt.Sprintf("mailto:%s", subscriber)
+	if !strings.HasPrefix(subscriber, "https:") && !strings.HasPrefix(subscriber, "mailto:") {
+		subscriber = "mailto:" + subscriber
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
-		"aud": fmt.Sprintf("%s://%s", subURL.Scheme, subURL.Host),
+		"aud": subURL.Scheme + "://" + subURL.Host,
 		"exp": expiration.Unix(),
 		"sub": subscriber,
 	})
@@ -169,9 +169,5 @@ func getVAPIDAuthorizationHeader(
 		return "", err
 	}
 
-	return fmt.Sprintf(
-		"vapid t=%s, k=%s",
-		jwtString,
-		vapidKeys.publicKey,
-	), nil
+	return "vapid t=" + jwtString + ", k=" + vapidKeys.publicKey, nil
 }
