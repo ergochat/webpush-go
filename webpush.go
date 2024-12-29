@@ -129,17 +129,11 @@ type Subscription struct {
 	Keys     Keys   `json:"keys"`
 }
 
-// SendNotification calls SendNotificationWithContext with default context for backwards-compatibility
-func SendNotification(message []byte, s *Subscription, options *Options) (*http.Response, error) {
-	return SendNotificationWithContext(context.Background(), message, s, options)
-}
-
-// SendNotificationWithContext sends a push notification to a subscription's endpoint
-// Message Encryption for Web Push, and VAPID protocols.
-// FOR MORE INFORMATION SEE RFC8291: https://datatracker.ietf.org/doc/rfc8291
-func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscription, options *Options) (*http.Response, error) {
+// SendNotification sends a push notification to a subscription's endpoint,
+// applying encryption (RFC 8291) and adding a VAPID header (RFC 8292).
+func SendNotification(ctx context.Context, message []byte, s *Subscription, options *Options) (*http.Response, error) {
 	// Compose message body (RFC8291 encryption of the message)
-	body, err := composeEncryptedBody(message, s.Keys, options.RecordSize)
+	body, err := EncryptNotification(message, s.Keys, options.RecordSize)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +153,10 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	return sendNotification(ctx, s.Endpoint, options, vapidAuthHeader, body)
 }
 
-func composeEncryptedBody(message []byte, keys Keys, recordSize uint32) ([]byte, error) {
+// EncryptNotification implements the encryption algorithm specified by RFC 8291 for web push
+// (RFC 8188's aes128gcm content-encoding, with the key material derived from
+// elliptic curve Diffie-Hellman over the P-256 curve).
+func EncryptNotification(message []byte, keys Keys, recordSize uint32) ([]byte, error) {
 	// Get the record size
 	if recordSize == 0 {
 		recordSize = MaxRecordSize

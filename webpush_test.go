@@ -49,7 +49,7 @@ func TestSendNotificationToURLEncodedSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := SendNotification([]byte("Test"), getURLEncodedTestSubscription(), &Options{
+	resp, err := SendNotification(context.Background(), []byte("Test"), getURLEncodedTestSubscription(), &Options{
 		HTTPClient: &testHTTPClient{},
 		RecordSize: 3070,
 		Subscriber: "<EMAIL@EXAMPLE.COM>",
@@ -76,7 +76,7 @@ func TestSendNotificationToStandardEncodedSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := SendNotification([]byte("Test"), getStandardEncodedTestSubscription(), &Options{
+	resp, err := SendNotification(context.Background(), []byte("Test"), getStandardEncodedTestSubscription(), &Options{
 		HTTPClient: &testHTTPClient{},
 		Subscriber: "<EMAIL@EXAMPLE.COM>",
 		Topic:      "test_topic",
@@ -98,7 +98,7 @@ func TestSendNotificationToStandardEncodedSubscription(t *testing.T) {
 }
 
 func TestSendTooLargeNotification(t *testing.T) {
-	_, err := SendNotification([]byte(strings.Repeat("Test", int(MaxRecordSize))), getStandardEncodedTestSubscription(), &Options{
+	_, err := SendNotification(context.Background(), []byte(strings.Repeat("Test", int(MaxRecordSize))), getStandardEncodedTestSubscription(), &Options{
 		HTTPClient: &testHTTPClient{},
 		Subscriber: "<EMAIL@EXAMPLE.COM>",
 		Topic:      "test_topic",
@@ -129,7 +129,7 @@ func BenchmarkWebPush(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := SendNotificationWithContext(ctx, message, sub, &options); err != nil {
+		if _, err := SendNotification(ctx, message, sub, &options); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -2,6 +2,7 @@ package webpush
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -139,7 +140,7 @@ func TestEnd2End(t *testing.T) {
 
 	// ...and the application server uses the subscription to send a push notification
 	sentMessage := "this is our test push notification"
-	resp, err := SendNotification([]byte(sentMessage), &applicationServer.subscription, &Options{
+	resp, err := SendNotification(context.Background(), []byte(sentMessage), &applicationServer.subscription, &Options{
 		HTTPClient: mockPushService.Client(),
 		VAPIDKeys:  applicationServer.vapidKeys,
 		Subscriber: "test@example.com",
