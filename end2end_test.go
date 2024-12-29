@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,9 +27,8 @@ func TestEnd2End(t *testing.T) {
 	var (
 		// the data known to the application server (backend, which uses webpush-go)
 		applicationServer struct {
-			publicVAPIDKey  string
-			privateVAPIDKey string
-			subscription    Subscription
+			vapidKeys    *VAPIDKeys
+			subscription Subscription
 		}
 		// the data known to the user agent (browser)
 		userAgent struct {
@@ -48,17 +48,14 @@ func TestEnd2End(t *testing.T) {
 	)
 
 	// a VAPID key pair for the application server, usually only generated once and reused
-	applicationServer.privateVAPIDKey, applicationServer.publicVAPIDKey, err = GenerateVAPIDKeys()
+	applicationServer.vapidKeys, err = GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatalf("generating VAPID keys: %s", err)
 	}
 
 	// The application server needs to inform the user agent of the public VAPID key.
 	// (We decode it first for ease of use.)
-	userAgent.publicVAPIDKey, err = decodeVAPIDPublicKey(applicationServer.publicVAPIDKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	userAgent.publicVAPIDKey = applicationServer.vapidKeys.privateKey.Public().(*ecdsa.PublicKey)
 
 	// We need a mock push service for webpush-go to send notifications to.
 	var mockPushService *httptest.Server
@@ -93,6 +90,13 @@ func TestEnd2End(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		contentLength, err := strconv.Atoi(r.Header.Get("Content-Length"))
+		if err != nil {
+			t.Errorf("invalid content-length `%s`: %v", r.Header.Get("Content-Length"), err)
+		}
+		if len(body) != contentLength {
+			t.Errorf("body length %d did not match content-length header %d", len(body), contentLength)
+		}
 		// store body for later decoding by user agent
 		// (the push service doesn't have the key required for decryption)
 		pushService.receivedNotifications = append(pushService.receivedNotifications, body)
@@ -123,8 +127,8 @@ func TestEnd2End(t *testing.T) {
 		pushService.applicationServerKey = userAgent.publicVAPIDKey
 		userAgent.subscription = Subscription{
 			Keys: Keys{
-				Auth:   base64.StdEncoding.EncodeToString(userAgent.authSecret[:]),
-				P256dh: base64.StdEncoding.EncodeToString(ecdhPublicKey.Bytes()),
+				Auth:   userAgent.authSecret,
+				P256dh: ecdhPublicKey,
 			},
 			Endpoint: mockPushService.URL,
 		}
@@ -136,10 +140,9 @@ func TestEnd2End(t *testing.T) {
 	// ...and the application server uses the subscription to send a push notification
 	sentMessage := "this is our test push notification"
 	resp, err := SendNotification([]byte(sentMessage), &applicationServer.subscription, &Options{
-		HTTPClient:      mockPushService.Client(),
-		VAPIDPublicKey:  applicationServer.publicVAPIDKey,
-		VAPIDPrivateKey: applicationServer.privateVAPIDKey,
-		Subscriber:      "test@example.com",
+		HTTPClient: mockPushService.Client(),
+		VAPIDKeys:  applicationServer.vapidKeys,
+		Subscriber: "test@example.com",
 	})
 	if err != nil {
 		t.Fatalf("failed to send notification: %s", err)
@@ -367,30 +370,18 @@ func decodeNotification(body []byte, authSecret [16]byte, userAgentKey *ecdsa.Pr
 	return string(res), nil
 }
 
-// test for the decoding helper function
 func Test_decodeVAPIDPublicKey(t *testing.T) {
-	privKeyB64, pubKeyB64, err := GenerateVAPIDKeys()
+	vapidKeys, err := GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatalf("generating VAPID keys: %s", err)
 	}
 
-	// as a baseline, decode using the library functions
-	privKeyBytes, err := decodeVapidKey(privKeyB64)
-	if err != nil {
-		t.Fatalf("decoding private key: %s", err)
-	}
-	privKey, err := generateVAPIDHeaderKeys(privKeyBytes)
-	if err != nil {
-		t.Fatalf("converting private key: %s", err)
-	}
-	wantPubKey := &privKey.PublicKey
-
 	// now decode using our test helper and compare the results
-	gotPubKey, err := decodeVAPIDPublicKey(pubKeyB64)
+	gotPubKey, err := decodeVAPIDPublicKey(vapidKeys.publicKey)
 	if err != nil {
 		t.Fatalf("decoding public key")
 	}
-	if !gotPubKey.Equal(wantPubKey) {
-		t.Errorf("result differs:\ngot:  %v\nwant: %v", gotPubKey, wantPubKey)
+	if !gotPubKey.Equal(vapidKeys.privateKey.Public()) {
+		t.Errorf("result differs:\ngot:  %v\nwant: %v", gotPubKey, vapidKeys.privateKey.Public())
 	}
 }

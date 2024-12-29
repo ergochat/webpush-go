@@ -4,7 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -18,7 +18,7 @@ func TestVAPID(t *testing.T) {
 	sub := "test@test.com"
 
 	// Generate vapid keys
-	vapidPrivateKey, vapidPublicKey, err := GenerateVAPIDKeys()
+	vapidKeys, err := GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,8 +27,7 @@ func TestVAPID(t *testing.T) {
 	vapidAuthHeader, err := getVAPIDAuthorizationHeader(
 		s.Endpoint,
 		sub,
-		vapidPublicKey,
-		vapidPrivateKey,
+		vapidKeys,
 		time.Now().Add(time.Hour*12),
 	)
 	if err != nil {
@@ -44,17 +43,7 @@ func TestVAPID(t *testing.T) {
 		}
 
 		// To decode the token it needs the VAPID public key
-		b64 := base64.RawURLEncoding
-		decodedVapidPrivateKey, err := b64.DecodeString(vapidPrivateKey)
-		if err != nil {
-			t.Fatalf("Could not decode VAPID private key: %s", err)
-		}
-
-		privKey, err := generateVAPIDHeaderKeys(decodedVapidPrivateKey)
-		if err != nil {
-			t.Fatalf("Could not parse VAPID private key: %s", err)
-		}
-		return privKey.Public(), nil
+		return vapidKeys.privateKey.Public(), nil
 	})
 
 	// Check the claims on the token
@@ -78,17 +67,27 @@ func TestVAPID(t *testing.T) {
 }
 
 func TestVAPIDKeys(t *testing.T) {
-	privateKey, publicKey, err := GenerateVAPIDKeys()
+	vapidKeys, err := GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(privateKey) != 43 {
-		t.Fatal("Generated incorrect VAPID private key")
+	j, err := json.Marshal(vapidKeys)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if len(publicKey) != 87 {
-		t.Fatal("Generated incorrect VAPID public key")
+	vapidKeys2 := new(VAPIDKeys)
+	if err := json.Unmarshal(j, vapidKeys2); err != nil {
+		t.Fatal(err)
+	}
+
+	if !vapidKeys.privateKey.Equal(vapidKeys2.privateKey) {
+		t.Fatalf("could not round-trip private key")
+	}
+
+	if vapidKeys.publicKey != vapidKeys2.publicKey {
+		t.Fatalf("could not round-trip public key")
 	}
 }
 
@@ -185,5 +184,37 @@ func Test_ecdhPrivateKeyToECDSA(t *testing.T) {
 				t.Errorf("Roundtrip changed key from %v to %v", original, roundtrip)
 			}
 		})
+	}
+}
+
+func TestVAPIDKeyFromECDSA(t *testing.T) {
+	v, err := GenerateVAPIDKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	privKey := v.PrivateKey()
+	v2, err := ECDSAToVAPIDKeys(privKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Equal(v2) {
+		t.Fatal("ECDSAToVAPIDKeys failed round-trip")
+	}
+}
+
+func BenchmarkVAPIDSigning(b *testing.B) {
+	vapidKeys, err := GenerateVAPIDKeys()
+	if err != nil {
+		b.Fatal(err)
+	}
+	expiration := time.Now().Add(24 * time.Hour)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		getVAPIDAuthorizationHeader(
+			"https://test.push.service/v2/AOWJIDuOMDSo6uNnRXYNsw",
+			"https://application.server",
+			vapidKeys,
+			expiration,
+		)
 	}
 }

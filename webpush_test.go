@@ -1,6 +1,7 @@
 package webpush
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,39 +14,48 @@ func (*testHTTPClient) Do(*http.Request) (*http.Response, error) {
 }
 
 func getURLEncodedTestSubscription() *Subscription {
-	return &Subscription{
-		Endpoint: "https://updates.push.services.mozilla.com/wpush/v2/gAAAAA",
-		Keys: Keys{
-			P256dh: "BNNL5ZaTfK81qhXOx23-wewhigUeFb632jN6LvRWCFH1ubQr77FE_9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk",
-			Auth:   "zqbxT6JKstKSY9JKibZLSQ",
-		},
+	subJson := `{
+		"endpoint": "https://updates.push.services.mozilla.com/wpush/v2/gAAAAA",
+		"keys": {
+			"p256dh": "BNNL5ZaTfK81qhXOx23-wewhigUeFb632jN6LvRWCFH1ubQr77FE_9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk",
+			"auth":   "zqbxT6JKstKSY9JKibZLSQ"
+		}
+	}`
+	sub := new(Subscription)
+	if err := json.Unmarshal([]byte(subJson), sub); err != nil {
+		panic(err)
 	}
+	return sub
 }
 
 func getStandardEncodedTestSubscription() *Subscription {
-	return &Subscription{
-		Endpoint: "https://updates.push.services.mozilla.com/wpush/v2/gAAAAA",
-		Keys: Keys{
-			P256dh: "BNNL5ZaTfK81qhXOx23+wewhigUeFb632jN6LvRWCFH1ubQr77FE/9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk=",
-			Auth:   "zqbxT6JKstKSY9JKibZLSQ==",
-		},
+	subJson := `{
+		"endpoint": "https://updates.push.services.mozilla.com/wpush/v2/gAAAAA",
+		"keys": {
+			"p256dh": "BNNL5ZaTfK81qhXOx23+wewhigUeFb632jN6LvRWCFH1ubQr77FE/9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk=",
+			"auth":   "zqbxT6JKstKSY9JKibZLSQ=="
+		}
+	}`
+	sub := new(Subscription)
+	if err := json.Unmarshal([]byte(subJson), sub); err != nil {
+		panic(err)
 	}
+	return sub
 }
 
 func TestSendNotificationToURLEncodedSubscription(t *testing.T) {
-	priv, pub, err := GenerateVAPIDKeys()
+	vapidKeys, err := GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp, err := SendNotification([]byte("Test"), getURLEncodedTestSubscription(), &Options{
-		HTTPClient:      &testHTTPClient{},
-		RecordSize:      3070,
-		Subscriber:      "<EMAIL@EXAMPLE.COM>",
-		Topic:           "test_topic",
-		TTL:             0,
-		Urgency:         "low",
-		VAPIDPublicKey:  pub,
-		VAPIDPrivateKey: priv,
+		HTTPClient: &testHTTPClient{},
+		RecordSize: 3070,
+		Subscriber: "<EMAIL@EXAMPLE.COM>",
+		Topic:      "test_topic",
+		TTL:        0,
+		Urgency:    "low",
+		VAPIDKeys:  vapidKeys,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -61,17 +71,17 @@ func TestSendNotificationToURLEncodedSubscription(t *testing.T) {
 }
 
 func TestSendNotificationToStandardEncodedSubscription(t *testing.T) {
-	priv, _, err := GenerateVAPIDKeys()
+	vapidKeys, err := GenerateVAPIDKeys()
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp, err := SendNotification([]byte("Test"), getStandardEncodedTestSubscription(), &Options{
-		HTTPClient:      &testHTTPClient{},
-		Subscriber:      "<EMAIL@EXAMPLE.COM>",
-		Topic:           "test_topic",
-		TTL:             0,
-		Urgency:         "low",
-		VAPIDPrivateKey: priv,
+		HTTPClient: &testHTTPClient{},
+		Subscriber: "<EMAIL@EXAMPLE.COM>",
+		Topic:      "test_topic",
+		TTL:        0,
+		Urgency:    "low",
+		VAPIDKeys:  vapidKeys,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,12 +98,11 @@ func TestSendNotificationToStandardEncodedSubscription(t *testing.T) {
 
 func TestSendTooLargeNotification(t *testing.T) {
 	_, err := SendNotification([]byte(strings.Repeat("Test", int(MaxRecordSize))), getStandardEncodedTestSubscription(), &Options{
-		HTTPClient:      &testHTTPClient{},
-		Subscriber:      "<EMAIL@EXAMPLE.COM>",
-		Topic:           "test_topic",
-		TTL:             0,
-		Urgency:         "low",
-		VAPIDPrivateKey: "testKey",
+		HTTPClient: &testHTTPClient{},
+		Subscriber: "<EMAIL@EXAMPLE.COM>",
+		Topic:      "test_topic",
+		TTL:        0,
+		Urgency:    "low",
 	})
 	if err == nil {
 		t.Fatalf("Error is nil, expected=%s", ErrMaxPadExceeded)

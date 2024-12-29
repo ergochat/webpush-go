@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +24,11 @@ import (
 
 const MaxRecordSize uint32 = 4096
 
-var ErrMaxPadExceeded = errors.New("payload has exceeded the maximum length")
+var (
+	ErrMaxPadExceeded = errors.New("payload has exceeded the maximum length")
+
+	invalidAuthKeyLength = errors.New("invalid auth key length (must be 16)")
+)
 
 // saltFunc generates a salt of 16 bytes
 var saltFunc = func() ([]byte, error) {
@@ -47,17 +52,84 @@ type Options struct {
 	RecordSize      uint32     // Limit the record size
 	Subscriber      string     // Sub in VAPID JWT token
 	Topic           string     // Set the Topic header to collapse a pending messages (Optional)
-	TTL             int        // Set the TTL on the endpoint POST request
+	TTL             int        // Set the TTL on the endpoint POST request, in seconds
 	Urgency         Urgency    // Set the Urgency header to change a message priority (Optional)
-	VAPIDPublicKey  string     // VAPID public key, passed in VAPID Authorization header
-	VAPIDPrivateKey string     // VAPID private key, used to sign VAPID JWT token
+	VAPIDKeys       *VAPIDKeys // VAPID public-private keypair to generate the VAPID Authorization header
 	VapidExpiration time.Time  // optional expiration for VAPID JWT token (defaults to now + 12 hours)
 }
 
-// Keys are the base64 encoded values from PushSubscription.getKey()
+// Keys represents a subscription's keys (its ECDH public key on the P-256 curve
+// and its 16-byte authentication secret).
 type Keys struct {
+	Auth   [16]byte
+	P256dh *ecdh.PublicKey
+}
+
+// Equal compares two Keys for equality.
+func (k *Keys) Equal(o Keys) bool {
+	return k.Auth == o.Auth && k.P256dh.Equal(o.P256dh)
+}
+
+var _ json.Marshaler = (*Keys)(nil)
+var _ json.Unmarshaler = (*Keys)(nil)
+
+type marshaledKeys struct {
 	Auth   string `json:"auth"`
 	P256dh string `json:"p256dh"`
+}
+
+// MarshalJSON implements json.Marshaler, allowing serialization to JSON.
+func (k *Keys) MarshalJSON() ([]byte, error) {
+	m := marshaledKeys{
+		Auth:   base64.RawStdEncoding.EncodeToString(k.Auth[:]),
+		P256dh: base64.RawStdEncoding.EncodeToString(k.P256dh.Bytes()),
+	}
+	return json.Marshal(&m)
+}
+
+// MarshalJSON implements json.Unmarshaler, allowing deserialization from JSON.
+func (k *Keys) UnmarshalJSON(b []byte) (err error) {
+	var m marshaledKeys
+	if err := json.Unmarshal(b, &m); err != nil {
+		return err
+	}
+	authBytes, err := decodeSubscriptionKey(m.Auth)
+	if err != nil {
+		return err
+	}
+	if len(authBytes) != 16 {
+		return fmt.Errorf("invalid auth bytes length %d (must be 16)", len(authBytes))
+	}
+	copy(k.Auth[:], authBytes)
+	rawDHKey, err := decodeSubscriptionKey(m.P256dh)
+	if err != nil {
+		return err
+	}
+	k.P256dh, err = ecdh.P256().NewPublicKey(rawDHKey)
+	return err
+}
+
+// DecodeSubscriptionKeys decodes and validates a base64-encoded pair of subscription keys
+// (the authentication secret and ECDH public key).
+func DecodeSubscriptionKeys(auth, p256dh string) (keys Keys, err error) {
+	authBytes, err := decodeSubscriptionKey(auth)
+	if err != nil {
+		return
+	}
+	if len(authBytes) != 16 {
+		err = invalidAuthKeyLength
+		return
+	}
+	copy(keys.Auth[:], authBytes)
+	dhBytes, err := decodeSubscriptionKey(p256dh)
+	if err != nil {
+		return
+	}
+	keys.P256dh, err = ecdh.P256().NewPublicKey(dhBytes)
+	if err != nil {
+		return
+	}
+	return
 }
 
 // Subscription represents a PushSubscription object from the Push API
@@ -75,22 +147,6 @@ func SendNotification(message []byte, s *Subscription, options *Options) (*http.
 // Message Encryption for Web Push, and VAPID protocols.
 // FOR MORE INFORMATION SEE RFC8291: https://datatracker.ietf.org/doc/rfc8291
 func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscription, options *Options) (*http.Response, error) {
-	// Authentication secret (auth_secret)
-	authSecret, err := decodeSubscriptionKey(s.Keys.Auth)
-	if err != nil {
-		return nil, fmt.Errorf("decoding keys.auth: %w", err)
-	}
-
-	// dh (Diffie Hellman)
-	dh, err := decodeSubscriptionKey(s.Keys.P256dh)
-	if err != nil {
-		return nil, fmt.Errorf("decoding keys.p256dh: %w", err)
-	}
-	userAgentPublicKey, err := ecdh.P256().NewPublicKey(dh)
-	if err != nil {
-		return nil, fmt.Errorf("validating keys.p256dh: %w", err)
-	}
-
 	// Generate 16 byte salt
 	salt, err := saltFunc()
 	if err != nil {
@@ -108,7 +164,7 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	localPublicKey := localPrivateKey.PublicKey()
 
 	// Combine application keys with receiver's EC public key to derive ECDH shared secret
-	sharedECDHSecret, err := localPrivateKey.ECDH(userAgentPublicKey)
+	sharedECDHSecret, err := localPrivateKey.ECDH(s.Keys.P256dh)
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
@@ -117,10 +173,10 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 
 	// ikm
 	prkInfoBuf := bytes.NewBuffer([]byte("WebPush: info\x00"))
-	prkInfoBuf.Write(dh)
+	prkInfoBuf.Write(s.Keys.P256dh.Bytes())
 	prkInfoBuf.Write(localPublicKey.Bytes())
 
-	prkHKDF := hkdf.New(hash, sharedECDHSecret, authSecret, prkInfoBuf.Bytes())
+	prkHKDF := hkdf.New(hash, sharedECDHSecret, s.Keys.Auth[:], prkInfoBuf.Bytes())
 	ikm, err := getHKDFKey(prkHKDF, 32)
 	if err != nil {
 		return nil, err
@@ -218,8 +274,7 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	vapidAuthHeader, err := getVAPIDAuthorizationHeader(
 		s.Endpoint,
 		options.Subscriber,
-		options.VAPIDPublicKey,
-		options.VAPIDPrivateKey,
+		options.VAPIDKeys,
 		expiration,
 	)
 	if err != nil {
@@ -240,20 +295,13 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 }
 
 // decodeSubscriptionKey decodes a base64 subscription key.
-// if necessary, add "=" padding to the key for URL decode
 func decodeSubscriptionKey(key string) ([]byte, error) {
-	// "=" padding
-	buf := bytes.NewBufferString(key)
-	if rem := len(key) % 4; rem != 0 {
-		buf.WriteString(strings.Repeat("=", 4-rem))
-	}
+	key = strings.TrimRight(key, "=")
 
-	bytes, err := base64.StdEncoding.DecodeString(buf.String())
-	if err == nil {
-		return bytes, nil
+	if strings.IndexByte(key, '+') != -1 || strings.IndexByte(key, '/') != -1 {
+		return base64.RawStdEncoding.DecodeString(key)
 	}
-
-	return base64.URLEncoding.DecodeString(buf.String())
+	return base64.RawURLEncoding.DecodeString(key)
 }
 
 // Returns a key of length "length" given an hkdf function
