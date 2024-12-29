@@ -167,7 +167,7 @@ func TestEnd2End(t *testing.T) {
 	// the push service then forwards the notification to the user agent
 	userAgent.receivedNotifications = pushService.receivedNotifications
 	// and the user agent can decrypt them
-	receivedMessage, err := decodeNotification(userAgent.receivedNotifications[0], userAgent.authSecret, userAgent.subscriptionKey)
+	receivedMessage, err := decryptNotification(userAgent.receivedNotifications[0], userAgent.authSecret, userAgent.subscriptionKey)
 	if err != nil {
 		t.Fatalf("error decrypting notification in user agent: %s", err)
 	}
@@ -265,7 +265,7 @@ func parseJWT(rawJWT string, applicationServerKey *ecdsa.PublicKey) (*jwt.Token,
 	return token, nil
 }
 
-func decodeNotification(body []byte, authSecret [16]byte, userAgentECDHKey *ecdh.PrivateKey) (string, error) {
+func decryptNotification(body []byte, authSecret [16]byte, userAgentECDHKey *ecdh.PrivateKey) (string, error) {
 	// remember initial body length, before we start consuming it
 	bodyLen := len(body)
 	// the body is aes128gcm-encoded as described in RFC8188,
@@ -359,6 +359,38 @@ func decodeNotification(body []byte, authSecret [16]byte, userAgentECDHKey *ecdh
 	res = res[:lastNull-1]
 
 	return string(res), nil
+}
+
+func TestRandomRoundTrip(t *testing.T) {
+	privKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := Keys{
+		P256dh: privKey.PublicKey(),
+	}
+	_, err = rand.Read(keys.Auth[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for length := 0; length < 1900; length++ {
+		message := make([]byte, length)
+		if _, err := rand.Read(message); err != nil {
+			t.Fatal(err)
+		}
+		encrypted, err := EncryptNotification(message, keys, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decrypted, err := decryptNotification(encrypted, keys.Auth, privKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(message) != decrypted {
+			t.Fatalf("round trip failed at message length %d", length)
+		}
+	}
 }
 
 func Test_decodeVAPIDPublicKey(t *testing.T) {
