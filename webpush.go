@@ -25,23 +25,12 @@ import (
 const MaxRecordSize uint32 = 4096
 
 var (
-	ErrMaxPadExceeded = errors.New("payload has exceeded the maximum length")
+	ErrRecordSizeTooSmall = errors.New("record size too small for message")
 
 	invalidAuthKeyLength = errors.New("invalid auth key length (must be 16)")
 
 	defaultHTTPClient = &http.Client{}
 )
-
-// saltFunc generates a salt of 16 bytes
-var saltFunc = func() ([]byte, error) {
-	salt := make([]byte, 16)
-	_, err := io.ReadFull(rand.Reader, salt)
-	if err != nil {
-		return salt, err
-	}
-
-	return salt, nil
-}
 
 // HTTPClient is an interface for sending the notification HTTP request / testing
 type HTTPClient interface {
@@ -149,36 +138,81 @@ func SendNotification(message []byte, s *Subscription, options *Options) (*http.
 // Message Encryption for Web Push, and VAPID protocols.
 // FOR MORE INFORMATION SEE RFC8291: https://datatracker.ietf.org/doc/rfc8291
 func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscription, options *Options) (*http.Response, error) {
-	// Generate 16 byte salt
-	salt, err := saltFunc()
+	// Compose message body (RFC8291 encryption of the message)
+	body, err := composeEncryptedBody(message, s.Keys, options.RecordSize)
 	if err != nil {
-		return nil, fmt.Errorf("generating salt: %w", err)
+		return nil, err
 	}
 
-	// Create the ecdh_secret shared key pair
+	// Get VAPID Authorization header
+	vapidAuthHeader, err := getVAPIDAuthorizationHeader(
+		s.Endpoint,
+		options.Subscriber,
+		options.VAPIDKeys,
+		options.VapidExpiration,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compose and send the HTTP request
+	return sendNotification(ctx, s.Endpoint, options, vapidAuthHeader, body)
+}
+
+func composeEncryptedBody(message []byte, keys Keys, recordSize uint32) ([]byte, error) {
+	// Get the record size
+	if recordSize == 0 {
+		recordSize = MaxRecordSize
+	} else if recordSize < 128 {
+		return nil, ErrRecordSizeTooSmall
+	}
+
+	// Allocate buffer to hold the eventual message
+	// [ header block ] [ ciphertext ] [ 16 byte AEAD tag ], totaling RecordSize bytes
+	// the ciphertext is the encryption of: [ message ] [ \x02 ] [ 0 or more \x00 as needed ]
+	recordBuf := make([]byte, recordSize)
+	// remainingBuf tracks our current writing position in recordBuf:
+	remainingBuf := recordBuf
 
 	// Application server key pairs (single use)
 	localPrivateKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-
 	localPublicKey := localPrivateKey.PublicKey()
 
+	// Encryption Content-Coding Header
+	// +-----------+--------+-----------+---------------+
+	// | salt (16) | rs (4) | idlen (1) | keyid (idlen) |
+	// +-----------+--------+-----------+---------------+
+	// in our case the keyid is localPublicKey.Bytes(), so 65 bytes
+	// First, generate the salt
+	_, err = rand.Read(remainingBuf[:16])
+	if err != nil {
+		return nil, err
+	}
+	salt := remainingBuf[:16]
+	remainingBuf = remainingBuf[16:]
+	binary.BigEndian.PutUint32(remainingBuf[:], recordSize)
+	remainingBuf = remainingBuf[4:]
+	localPublicKeyBytes := localPublicKey.Bytes()
+	remainingBuf[0] = byte(len(localPublicKeyBytes))
+	remainingBuf = remainingBuf[1:]
+	copy(remainingBuf[:], localPublicKeyBytes)
+	remainingBuf = remainingBuf[len(localPublicKeyBytes):]
+
 	// Combine application keys with receiver's EC public key to derive ECDH shared secret
-	sharedECDHSecret, err := localPrivateKey.ECDH(s.Keys.P256dh)
+	sharedECDHSecret, err := localPrivateKey.ECDH(keys.P256dh)
 	if err != nil {
 		return nil, fmt.Errorf("deriving shared secret: %w", err)
 	}
 
-	hash := sha256.New
-
 	// ikm
 	prkInfoBuf := bytes.NewBuffer([]byte("WebPush: info\x00"))
-	prkInfoBuf.Write(s.Keys.P256dh.Bytes())
+	prkInfoBuf.Write(keys.P256dh.Bytes())
 	prkInfoBuf.Write(localPublicKey.Bytes())
 
-	prkHKDF := hkdf.New(hash, sharedECDHSecret, s.Keys.Auth[:], prkInfoBuf.Bytes())
+	prkHKDF := hkdf.New(sha256.New, sharedECDHSecret, keys.Auth[:], prkInfoBuf.Bytes())
 	ikm, err := getHKDFKey(prkHKDF, 32)
 	if err != nil {
 		return nil, err
@@ -186,7 +220,7 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 
 	// Derive Content Encryption Key
 	contentEncryptionKeyInfo := []byte("Content-Encoding: aes128gcm\x00")
-	contentHKDF := hkdf.New(hash, ikm, salt, contentEncryptionKeyInfo)
+	contentHKDF := hkdf.New(sha256.New, ikm, salt, contentEncryptionKeyInfo)
 	contentEncryptionKey, err := getHKDFKey(contentHKDF, 16)
 	if err != nil {
 		return nil, err
@@ -194,7 +228,7 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 
 	// Derive the Nonce
 	nonceInfo := []byte("Content-Encoding: nonce\x00")
-	nonceHKDF := hkdf.New(hash, ikm, salt, nonceInfo)
+	nonceHKDF := hkdf.New(sha256.New, ikm, salt, nonceInfo)
 	nonce, err := getHKDFKey(nonceHKDF, 12)
 	if err != nil {
 		return nil, err
@@ -205,46 +239,37 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	if err != nil {
 		return nil, err
 	}
-
 	gcm, err := cipher.NewGCM(c)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get the record size
-	recordSize := options.RecordSize
-	if recordSize == 0 {
-		recordSize = MaxRecordSize
+	// need 1 byte for the 0x02 delimiter, 16 bytes for the AEAD tag
+	if len(remainingBuf) < len(message)+17 {
+		return nil, ErrRecordSizeTooSmall
 	}
+	// Copy the message plaintext into the buffer
+	copy(remainingBuf[:], message[:])
+	// The plaintext to be encrypted will include the padding delimiter and the padding;
+	// cut off the final 16 bytes that are reserved for the AEAD tag
+	plaintext := remainingBuf[:len(remainingBuf)-16]
+	remainingBuf = remainingBuf[len(message):]
+	// Add padding delimiter
+	remainingBuf[0] = '\x02'
+	remainingBuf = remainingBuf[1:]
+	// The rest of the buffer is already zero-padded
 
-	recordLength := int(recordSize) - 16
+	// Encipher the plaintext in place, then add the AEAD tag at the end.
+	// "To reuse plaintext's storage for the encrypted output, use plaintext[:0]
+	// as dst. Otherwise, the remaining capacity of dst must not overlap plaintext."
+	gcm.Seal(plaintext[:0], nonce, plaintext, nil)
 
-	// Encryption Content-Coding Header
-	recordBuf := bytes.NewBuffer(salt)
+	return recordBuf, nil
+}
 
-	rs := make([]byte, 4)
-	binary.BigEndian.PutUint32(rs, recordSize)
-
-	recordBuf.Write(rs)
-	recordBuf.Write([]byte{byte(len(localPublicKey.Bytes()))})
-	recordBuf.Write(localPublicKey.Bytes())
-
-	// Data
-	dataBuf := bytes.NewBuffer(message)
-
-	// Pad content to max record size - 16 - header
-	// Padding ending delimeter
-	dataBuf.Write([]byte("\x02"))
-	if err := pad(dataBuf, recordLength-recordBuf.Len()); err != nil {
-		return nil, err
-	}
-
-	// Compose the ciphertext
-	ciphertext := gcm.Seal([]byte{}, nonce, dataBuf.Bytes(), nil)
-	recordBuf.Write(ciphertext)
-
+func sendNotification(ctx context.Context, endpoint string, options *Options, vapidAuthHeader string, body []byte) (*http.Response, error) {
 	// POST request
-	req, err := http.NewRequest("POST", s.Endpoint, recordBuf)
+	req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
 	}
@@ -264,22 +289,6 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 
 	if isValidUrgency(options.Urgency) {
 		req.Header.Set("Urgency", string(options.Urgency))
-	}
-
-	expiration := options.VapidExpiration
-	if expiration.IsZero() {
-		expiration = time.Now().Add(time.Hour * 12)
-	}
-
-	// Get VAPID Authorization header
-	vapidAuthHeader, err := getVAPIDAuthorizationHeader(
-		s.Endpoint,
-		options.Subscriber,
-		options.VAPIDKeys,
-		expiration,
-	)
-	if err != nil {
-		return nil, err
 	}
 
 	req.Header.Set("Authorization", vapidAuthHeader)
@@ -314,18 +323,4 @@ func getHKDFKey(hkdf io.Reader, length int) ([]byte, error) {
 	}
 
 	return key, nil
-}
-
-func pad(payload *bytes.Buffer, maxPadLen int) error {
-	payloadLen := payload.Len()
-	if payloadLen > maxPadLen {
-		return ErrMaxPadExceeded
-	}
-
-	padLen := maxPadLen - payloadLen
-
-	padding := make([]byte, padLen)
-	payload.Write(padding)
-
-	return nil
 }

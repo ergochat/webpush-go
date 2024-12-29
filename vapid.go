@@ -146,6 +146,10 @@ func getVAPIDAuthorizationHeader(
 	vapidKeys *VAPIDKeys,
 	expiration time.Time,
 ) (string, error) {
+	if expiration.IsZero() {
+		expiration = time.Now().Add(time.Hour * 12)
+	}
+
 	// Create the JWT token
 	subURL, err := url.Parse(endpoint)
 	if err != nil {

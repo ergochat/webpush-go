@@ -106,7 +106,7 @@ func TestSendTooLargeNotification(t *testing.T) {
 		Urgency:    "low",
 	})
 	if err == nil {
-		t.Fatalf("Error is nil, expected=%s", ErrMaxPadExceeded)
+		t.Fatalf("Error is nil, expected=%s", ErrRecordSizeTooSmall)
 	}
 }
 
