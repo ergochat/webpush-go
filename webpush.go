@@ -28,6 +28,8 @@ var (
 	ErrMaxPadExceeded = errors.New("payload has exceeded the maximum length")
 
 	invalidAuthKeyLength = errors.New("invalid auth key length (must be 16)")
+
+	defaultHTTPClient = &http.Client{}
 )
 
 // saltFunc generates a salt of 16 bytes
@@ -287,7 +289,7 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	if options.HTTPClient != nil {
 		client = options.HTTPClient
 	} else {
-		client = &http.Client{}
+		client = defaultHTTPClient
 	}
 
 	return client.Do(req)
