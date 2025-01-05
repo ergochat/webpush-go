@@ -4,114 +4,174 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net/url"
+	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt"
+	jwt "github.com/golang-jwt/jwt/v5"
 )
 
-// GenerateVAPIDKeys will create a private and public VAPID key pair
-func GenerateVAPIDKeys() (privateKey, publicKey string, err error) {
-	// Get the private key from the P256 curve
-	curve := elliptic.P256()
+// VAPIDKeys is a public-private keypair for use in VAPID.
+// It marshals to a JSON string containing the PEM of the PKCS8
+// of the private key.
+type VAPIDKeys struct {
+	privateKey *ecdsa.PrivateKey
+	publicKey  string // raw bytes encoding in urlsafe base64, as per RFC
+}
 
-	private, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+// PublicKeyString returns the base64url-encoded uncompressed public key of the keypair,
+// as defined in RFC8292.
+func (v *VAPIDKeys) PublicKeyString() string {
+	return v.publicKey
+}
+
+// PrivateKey returns the private key of the keypair.
+func (v *VAPIDKeys) PrivateKey() *ecdsa.PrivateKey {
+	return v.privateKey
+}
+
+// Equal compares two VAPIDKeys for equality.
+func (v *VAPIDKeys) Equal(o *VAPIDKeys) bool {
+	return v.privateKey.Equal(o.privateKey)
+}
+
+var _ json.Marshaler = (*VAPIDKeys)(nil)
+var _ json.Unmarshaler = (*VAPIDKeys)(nil)
+
+// MarshalJSON implements json.Marshaler, allowing serialization to JSON.
+func (v *VAPIDKeys) MarshalJSON() ([]byte, error) {
+	pkcs8bytes, err := x509.MarshalPKCS8PrivateKey(v.privateKey)
+	if err != nil {
+		return nil, err
+	}
+	pemBlock := pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: pkcs8bytes,
+	}
+	pemBytes := pem.EncodeToMemory(&pemBlock)
+	if pemBytes == nil {
+		return nil, fmt.Errorf("could not encode VAPID keys as PEM")
+	}
+	return json.Marshal(string(pemBytes))
+}
+
+// MarshalJSON implements json.Unmarshaler, allowing deserialization from JSON.
+func (v *VAPIDKeys) UnmarshalJSON(b []byte) error {
+	var pemKey string
+	if err := json.Unmarshal(b, &pemKey); err != nil {
+		return err
+	}
+	pemBlock, _ := pem.Decode([]byte(pemKey))
+	if pemBlock == nil {
+		return fmt.Errorf("could not decode PEM block with VAPID keys")
+	}
+	privKey, err := x509.ParsePKCS8PrivateKey(pemBlock.Bytes)
+	if err != nil {
+		return err
+	}
+	privateKey, ok := privKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return fmt.Errorf("Invalid type of private key %T", privateKey)
+	}
+	if privateKey.Curve != elliptic.P256() {
+		return fmt.Errorf("Invalid curve for private key %v", privateKey.Curve)
+	}
+	publicKeyStr, err := makePublicKeyString(privateKey)
+	if err != nil {
+		return err // should not be possible since we confirmed P256 already
+	}
+
+	// success
+	v.privateKey = privateKey
+	v.publicKey = publicKeyStr
+	return nil
+}
+
+// GenerateVAPIDKeys generates a VAPID keypair (an ECDSA keypair on
+// the P-256 curve).
+func GenerateVAPIDKeys() (result *VAPIDKeys, err error) {
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return
 	}
 
-	public := elliptic.Marshal(curve, x, y)
+	pubKeyECDH, err := private.PublicKey.ECDH()
+	if err != nil {
+		return
+	}
+	publicKey := base64.RawURLEncoding.EncodeToString(pubKeyECDH.Bytes())
 
-	// Convert to base64
-	publicKey = base64.RawURLEncoding.EncodeToString(public)
-	privateKey = base64.RawURLEncoding.EncodeToString(private)
-
-	return
+	return &VAPIDKeys{
+		privateKey: private,
+		publicKey:  publicKey,
+	}, nil
 }
 
-// Generates the ECDSA public and private keys for the JWT encryption
-func generateVAPIDHeaderKeys(privateKey []byte) *ecdsa.PrivateKey {
-	// Public key
-	curve := elliptic.P256()
-	px, py := curve.ScalarMult(
-		curve.Params().Gx,
-		curve.Params().Gy,
-		privateKey,
-	)
-
-	pubKey := ecdsa.PublicKey{
-		Curve: curve,
-		X:     px,
-		Y:     py,
+// ECDSAToVAPIDKeys wraps an existing ecdsa.PrivateKey in VAPIDKeys for use in
+// VAPID header signing.
+func ECDSAToVAPIDKeys(privKey *ecdsa.PrivateKey) (result *VAPIDKeys, err error) {
+	if privKey.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("Invalid curve for private key %v", privKey.Curve)
 	}
-
-	// Private key
-	d := &big.Int{}
-	d.SetBytes(privateKey)
-
-	return &ecdsa.PrivateKey{
-		PublicKey: pubKey,
-		D:         d,
+	publicKeyString, err := makePublicKeyString(privKey)
+	if err != nil {
+		return nil, err
 	}
+	return &VAPIDKeys{
+		privateKey: privKey,
+		publicKey:  publicKeyString,
+	}, nil
+}
+
+func makePublicKeyString(privKey *ecdsa.PrivateKey) (result string, err error) {
+	// to get the raw bytes we have to convert the public key to *ecdh.PublicKey
+	// this type assertion (from the crypto.PublicKey returned by (*ecdsa.PrivateKey).Public()
+	// to *ecdsa.PublicKey) cannot fail:
+	publicKey, err := privKey.Public().(*ecdsa.PublicKey).ECDH()
+	if err != nil {
+		return // should not be possible if we confirmed P256 already
+	}
+	return base64.RawURLEncoding.EncodeToString(publicKey.Bytes()), nil
 }
 
 // getVAPIDAuthorizationHeader
 func getVAPIDAuthorizationHeader(
-	endpoint,
-	subscriber,
-	vapidPublicKey,
-	vapidPrivateKey string,
+	endpoint string,
+	subscriber string,
+	vapidKeys *VAPIDKeys,
 	expiration time.Time,
 ) (string, error) {
+	if expiration.IsZero() {
+		expiration = time.Now().Add(time.Hour * 12)
+	}
+
 	// Create the JWT token
 	subURL, err := url.Parse(endpoint)
 	if err != nil {
 		return "", err
 	}
 
+	// Unless subscriber is an HTTPS URL, assume an e-mail address
+	if !strings.HasPrefix(subscriber, "https:") && !strings.HasPrefix(subscriber, "mailto:") {
+		subscriber = "mailto:" + subscriber
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
-		"aud": fmt.Sprintf("%s://%s", subURL.Scheme, subURL.Host),
+		"aud": subURL.Scheme + "://" + subURL.Host,
 		"exp": expiration.Unix(),
-		"sub": fmt.Sprintf("mailto:%s", subscriber),
+		"sub": subscriber,
 	})
 
-	// Decode the VAPID private key
-	decodedVapidPrivateKey, err := decodeVapidKey(vapidPrivateKey)
-	if err != nil {
-		return "", err
-	}
-
-	privKey := generateVAPIDHeaderKeys(decodedVapidPrivateKey)
-
 	// Sign token with private key
-	jwtString, err := token.SignedString(privKey)
+	jwtString, err := token.SignedString(vapidKeys.privateKey)
 	if err != nil {
 		return "", err
 	}
 
-	// Decode the VAPID public key
-	pubKey, err := decodeVapidKey(vapidPublicKey)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf(
-		"vapid t=%s, k=%s",
-		jwtString,
-		base64.RawURLEncoding.EncodeToString(pubKey),
-	), nil
-}
-
-// Need to decode the vapid private key in multiple base64 formats
-// Solution from: https://github.com/SherClockHolmes/webpush-go/issues/29
-func decodeVapidKey(key string) ([]byte, error) {
-	bytes, err := base64.URLEncoding.DecodeString(key)
-	if err == nil {
-		return bytes, nil
-	}
-
-	return base64.RawURLEncoding.DecodeString(key)
+	return "vapid t=" + jwtString + ", k=" + vapidKeys.publicKey, nil
 }
