@@ -1,12 +1,13 @@
 # webpush-go
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/SherClockHolmes/webpush-go)](https://goreportcard.com/report/github.com/SherClockHolmes/webpush-go)
-[![GoDoc](https://godoc.org/github.com/SherClockHolmes/webpush-go?status.svg)](https://godoc.org/github.com/SherClockHolmes/webpush-go)
+[![GoDoc](https://godoc.org/github.com/ergochat/webpush-go?status.svg)](https://godoc.org/github.com/ergochat/webpush-go)
 
 Web Push API Encryption with VAPID support.
 
+This library is a fork of [SherClockHolmes/webpush-go](https://github.com/SherClockHolmes/webpush-go).
+
 ```bash
-go get -u github.com/SherClockHolmes/webpush-go
+go get -u github.com/ergochat/webpush-go/v2
 ```
 
 ## Example
@@ -19,20 +20,21 @@ package main
 import (
 	"encoding/json"
 
-	webpush "github.com/SherClockHolmes/webpush-go"
+	webpush "github.com/ergochat/webpush-go/v2"
 )
 
 func main() {
 	// Decode subscription
 	s := &webpush.Subscription{}
 	json.Unmarshal([]byte("<YOUR_SUBSCRIPTION>"), s)
+	vapidKeys := new(webpush.VAPIDKeys)
+	json.Unmarshal([]byte("<YOUR_VAPID_KEYS">), vapidKeys)
 
 	// Send Notification
 	resp, err := webpush.SendNotification([]byte("Test"), s, &webpush.Options{
 		Subscriber:      "example@example.com",
-		VAPIDPublicKey:  "<YOUR_VAPID_PUBLIC_KEY>",
-		VAPIDPrivateKey: "<YOUR_VAPID_PRIVATE_KEY>",
-		TTL:             30,
+		VAPIDKeys:       vapidKeys,
+		TTL:             3600, // seconds
 	})
 	if err != nil {
 		// TODO: Handle error
@@ -46,7 +48,7 @@ func main() {
 Use the helper method `GenerateVAPIDKeys` to generate the VAPID key pair.
 
 ```golang
-privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+vapidKeys, err := webpush.GenerateVAPIDKeys()
 if err != nil {
 	// TODO: Handle error
 }
